@@ -94,7 +94,7 @@ def set_model(update, context):
         update.message.reply_text("Укажите модель: /set_model gpt-4o-mini")
 
 # ====================================================================
-# ======================= ВАЖНАЯ ЛОГИКА ПРОВЕРОК ======================
+# ================== Упрощённая логика валидации =====================
 # ====================================================================
 
 def count_words_excluding_params(prompt_text: str) -> int:
@@ -111,43 +111,16 @@ def count_words_excluding_params(prompt_text: str) -> int:
             count += 1
     return count
 
-def first_sentence_ok(prompt_text: str) -> bool:
-    """
-    Проверяет, что первое предложение заканчивается точкой
-    и имеет не более 100 символов.
-    """
-    idx = prompt_text.find(".")
-    if idx == -1:
-        return False
-    length_first_sentence = idx + 1
-    return (length_first_sentence <= 100)
-
-def check_prompt_valid(prompt_text: str) -> bool:
-    """
-    Возвращает True, если prompt_text удовлетворяет:
-    1) Имеет не менее 28 слов (исключая --...).
-    2) Первое предложение <= 100 символов и заканчивается точкой.
-    """
-    word_count = count_words_excluding_params(prompt_text)
-    if word_count < 28:
-        logger.warning(f"Слишком мало слов: {word_count}")
-        return False
-    
-    if not first_sentence_ok(prompt_text):
-        logger.warning("Первое предложение > 100 символов или нет точки.")
-        return False
-
-    return True
-
-# ====================================================================
 def generate(update, context):
     """
-    /generate <count> <prompt> 
-    1) Если первый арг != число, count=10, всё = user_prompt.
-    2) Генерируем count раз (каждый раз ровно 1 промт).
-    3) В system/user сообщениях просим 45 слов, 
-       но реально принимаем от 28+ (проверка в check_prompt_valid).
-    4) Первое предложение <= 100 символов.
+    /generate <count> <prompt>
+    - В System/ User сообщениях просим: 
+      1) ~45 слов, 
+      2) первое предложение <= 100 символов,
+      3) один промт, 
+      4) заканчивать --ar ... --s ... --no logo.
+    - Но если GPT нарушит (например, >100 символов) — не «наказываем»,
+      просто примем как есть, лишь уберём запятые/точки возле --ar etc.
     """
     global bot_active
     if not bot_active:
@@ -170,39 +143,28 @@ def generate(update, context):
 
     try:
         prompts_data = []
-        count_generated = 0
-        attempts = 0
-
-        while count_generated < count and attempts < 100:
-            attempts += 1
-
+        for _ in range(count):
             # Рандом --ar
             ar_choice = random.choices(["--ar 3:2", "--ar 16:9", "--ar 2:3"], [0.6, 0.2, 0.2])[0]
             # Рандом --s
             s_choice = random.choices(["--s 50", "--s 250", ""], [0.25, 0.25, 0.5])[0]
 
-            # ================== System / User ===================
-            # ВНИМАНИЕ: Тут мы ПИШЕМ "минимум 45 слов",
-            # но фактически в check_prompt_valid() мы проверяем >=28.
             system_message = (
                 "You are an assistant that produces EXACTLY ONE single-line Midjourney prompt. "
                 "No greetings, no disclaimers, no multiple prompts in one answer.\n"
                 "Requirements:\n"
                 "1) The prompt must be at least 45 words (excluding any words starting with --).\n"
-                "2) The first sentence must be <= 100 characters and end with a period.\n"
-                "3) Include the idea of copy space.\n"
-                "4) If no specific style is given, make it a variety (people, no people, blurred backgrounds, objects on solid color, etc.).\n"
+                "2) The first sentence is ideally <= 100 characters and ends with a period.\n"
+                "3) Include copy space.\n"
+                "4) If no specific style is given, vary: people, no people, blurred backgrounds, objects on solid color, etc.\n"
                 f"5) End the prompt with: {ar_choice}{(' ' + s_choice if s_choice else '')} --no logo\n"
                 "6) Do NOT insert commas or periods right after --ar, --s, or --no logo.\n"
-                "7) Output only one line. No disclaimers, no 'Here is...' text.\n"
-                "8) If user says '10 prompts', you still only give ONE prompt in the answer.\n"
-                "9) Absolutely do not provide multiple prompts.\n"
-                "10) The prompt must represent an image scenario, with copy space, referencing eco or other user context if provided.\n"
+                "7) Output only one line.\n"
+                "8) Absolutely do not provide multiple prompts.\n"
             )
-
             user_message = (
                 f"{user_prompt}\n\n"
-                "IMPORTANT: Generate ONLY ONE prompt. It must be unique. Follow the system rules strictly."
+                "IMPORTANT: Generate ONLY ONE prompt. Follow the system rules strictly."
             )
 
             response = openai.ChatCompletion.create(
@@ -215,9 +177,8 @@ def generate(update, context):
             )
             raw_text = response.choices[0].message.content.strip()
 
-            # ========= Пост-обработка =========
+            # Пост-обработка
             raw_text = raw_text.replace("\n", " ").replace("\r", " ")
-
             # Обрезаем всё после первого '--no logo'
             match = re.search(r"(.*?--no logo)", raw_text, flags=re.IGNORECASE)
             if match:
@@ -237,26 +198,23 @@ def generate(update, context):
             if prompt_text.startswith('"') and prompt_text.endswith('"'):
                 prompt_text = prompt_text[1:-1].strip()
 
-            # Несколько --ar или --no logo => retry
+            # Если GPT впихнул несколько --ar / --no logo, можно убрать или оставить как есть
+            # Чтобы совсем не «наказывать», просто принимаем как есть.
+            # Если хотите хотя бы в лог писать предупреждение:
             if prompt_text.lower().count("--ar") > 1 or prompt_text.lower().count("--no logo") > 1:
-                logger.warning("GPT сгенерировал несколько промтов в одном ответе. Повтор запроса.")
-                time.sleep(1.0)
-                continue
+                logger.warning("GPT сгенерировал несколько промтов в одном ответе, но принимаем без наказания.")
 
-            # Проверяем минимальные 28 слов и первое предложение <=100 символов
-            if not check_prompt_valid(prompt_text):
-                logger.warning("Промт не прошёл локальную валидацию. Повтор запроса.")
-                time.sleep(1.0)
-                continue
+            # Не наказываем за короткие / длинные первые предложения
+            word_count = count_words_excluding_params(prompt_text)
+            if word_count < 28:
+                logger.warning(f"Промт короткий ({word_count} слов), но принимаем без наказания.")
 
-            # Всё ок
             prompts_data.append([prompt_text])
-            count_generated += 1
 
         worksheet = get_today_sheet()
         worksheet.append_rows(prompts_data)
 
-        update.message.reply_text(f"Готово! Сгенерировано {count_generated} промтов.")
+        update.message.reply_text(f"Готово! Сгенерировано {count} промтов.")
 
     except Exception as e:
         logger.error(f"Ошибка генерации: {e}")
