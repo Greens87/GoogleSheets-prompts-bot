@@ -1,11 +1,15 @@
 import os
 import json
 import logging
+import pprint  # Импортируем pprint для отладки
 import gspread
 import telegram
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
-import openai  # Используем модуль openai напрямую
+import openai
 from datetime import datetime
+
+# Временный вывод всех переменных окружения для отладки
+pprint.pprint(dict(os.environ))
 
 # Настройка логирования
 logging.basicConfig(
