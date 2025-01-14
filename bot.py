@@ -4,7 +4,7 @@ import logging
 import gspread
 import telegram
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
-from openai import OpenAI
+import openai  # Используем модуль openai напрямую
 from datetime import datetime
 
 # Настройка логирования
@@ -17,8 +17,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
 GOOGLE_CREDENTIALS = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
 
-# Инициализация OpenAI API
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Устанавливаем ключ OpenAI
+openai.api_key = OPENAI_API_KEY
 
 # Инициализация Google Sheets API
 gc = gspread.service_account_from_dict(GOOGLE_CREDENTIALS)
@@ -78,7 +78,7 @@ def generate(update, context):
 
         prompts = []
         for _ in range(count):
-            response = client.chat.completions.create(
+            response = openai.ChatCompletion.create(
                 model=current_model,
                 messages=[
                     {"role": "user", "content": "Generate a unique Midjourney prompt with copy space."}
