@@ -11,9 +11,9 @@ import random
 import re
 import time
 
-# ======= Отладка окружения (можно закомментировать) =======
+# ======= Временная отладка окружения (можно закомментировать) =======
 pprint.pprint(dict(os.environ))
-# ==========================================================
+# ====================================================================
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -27,7 +27,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 
-# Проверка наличия необходимых переменных
 if not TELEGRAM_TOKEN:
     raise ValueError("BOT_TOKEN не установлена!")
 if not OPENAI_API_KEY:
@@ -101,21 +100,13 @@ def set_model(update, context):
 def count_words_excluding_params(prompt_text: str) -> int:
     """
     Считает кол-во «обычных» слов, исключая те, что начинаются на '--'.
-    Пример: '--ar', '--s', '--no' не считаются.
-    Артикли, предлоги и т. д. тоже формально считаются словами, 
-    но по условию задачи нам не надо их игнорировать, 
-    главное - убрать все 'слова' с '--'.
     """
-    # Разобьём по пробелам:
     tokens = prompt_text.split()
     count = 0
     for t in tokens:
-        # Убираем пунктуацию в конце/начале слова. (Необязательно)
         candidate = t.strip(",.!?;:\r\n\"'()[]")
-        # Проверяем, начинается ли с --
         if candidate.startswith("--"):
             continue
-        # Если осталось что-то, считаем это словом
         if candidate:
             count += 1
     return count
@@ -123,36 +114,29 @@ def count_words_excluding_params(prompt_text: str) -> int:
 def first_sentence_ok(prompt_text: str) -> bool:
     """
     Проверяет, что первое предложение заканчивается точкой
-    и имеет не более 100 символов (включая пробелы).
-    Ищет первую точку '.' и проверяет длину до неё.
+    и имеет не более 100 символов.
     """
     idx = prompt_text.find(".")
     if idx == -1:
-        # Нет точки вообще
         return False
-    # Длина до точки (включая эту точку)
     length_first_sentence = idx + 1
     return (length_first_sentence <= 100)
 
 def check_prompt_valid(prompt_text: str) -> bool:
     """
     Возвращает True, если prompt_text удовлетворяет:
-    1) Имеет не менее 45 слов (исключая --ar, --s, --no).
+    1) Имеет не менее 28 слов (исключая --...).
     2) Первое предложение <= 100 символов и заканчивается точкой.
-    3) Содержит хотя бы одну точку (условие 2) говорит, что точка есть).
     """
-    # Считаем слова
     word_count = count_words_excluding_params(prompt_text)
-    if word_count < 45:
+    if word_count < 28:
         logger.warning(f"Слишком мало слов: {word_count}")
         return False
     
-    # Проверка первого предложения
     if not first_sentence_ok(prompt_text):
         logger.warning("Первое предложение > 100 символов или нет точки.")
         return False
 
-    # Можно добавить ещё проверки: уникальность, разнообразие и т.д.
     return True
 
 # ====================================================================
@@ -161,12 +145,9 @@ def generate(update, context):
     /generate <count> <prompt> 
     1) Если первый арг != число, count=10, всё = user_prompt.
     2) Генерируем count раз (каждый раз ровно 1 промт).
-    3) Проверяем:
-       - не менее 45 слов (без учёта '--...')
-       - первое предложение <= 100 символов, заканчивается точкой
-    4) Если GPT вернул несколько промтов, отсекаем всё после первого "--no logo"
-       и проверяем, что нет второго "--ar".
-    5) Если проверка не пройдена — повторяем запрос.
+    3) В system/user сообщениях просим 45 слов, 
+       но реально принимаем от 28+ (проверка в check_prompt_valid).
+    4) Первое предложение <= 100 символов.
     """
     global bot_active
     if not bot_active:
@@ -201,15 +182,14 @@ def generate(update, context):
             s_choice = random.choices(["--s 50", "--s 250", ""], [0.25, 0.25, 0.5])[0]
 
             # ================== System / User ===================
-            # Если не указана стилистика, мы можем "вбрасывать" рандомную 
-            # стилистику (портрет / фото без людей / и т.д.) - но это уже на ваше усмотрение.
-            # Здесь лишь жестко прописываем, что нужен 1 промт, без повторений.
+            # ВНИМАНИЕ: Тут мы ПИШЕМ "минимум 45 слов",
+            # но фактически в check_prompt_valid() мы проверяем >=28.
             system_message = (
                 "You are an assistant that produces EXACTLY ONE single-line Midjourney prompt. "
                 "No greetings, no disclaimers, no multiple prompts in one answer.\n"
                 "Requirements:\n"
                 "1) The prompt must be at least 45 words (excluding any words starting with --).\n"
-                "2) The first sentence must be <= 100 characters and end with a period ('.').\n"
+                "2) The first sentence must be <= 100 characters and end with a period.\n"
                 "3) Include the idea of copy space.\n"
                 "4) If no specific style is given, make it a variety (people, no people, blurred backgrounds, objects on solid color, etc.).\n"
                 f"5) End the prompt with: {ar_choice}{(' ' + s_choice if s_choice else '')} --no logo\n"
@@ -238,45 +218,41 @@ def generate(update, context):
             # ========= Пост-обработка =========
             raw_text = raw_text.replace("\n", " ").replace("\r", " ")
 
-            # Обрезаем, чтобы не было нескольких промтов
-            # Ищем первое "--no logo", всё остальное - в корзину.
+            # Обрезаем всё после первого '--no logo'
             match = re.search(r"(.*?--no logo)", raw_text, flags=re.IGNORECASE)
             if match:
                 prompt_text = match.group(1).strip()
             else:
                 prompt_text = raw_text
 
-            # Удаляем знаки препинания после --ar / --s / --no logo
+            # Убираем пунктуацию возле --ar, --s, --no logo
             prompt_text = re.sub(r'(\-\-ar\s*\d+:\d+)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
             prompt_text = re.sub(r'(\-\-s\s*\d+)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
             prompt_text = re.sub(r'(\-\-no\s+logo)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
 
-            # Удаляем знаки препинания перед параметрами
             prompt_text = re.sub(r'[,\.;:\!\?]+\s+(\-\-ar\s*\d+:\d+)', r' \1', prompt_text, flags=re.IGNORECASE)
             prompt_text = re.sub(r'[,\.;:\!\?]+\s+(\-\-s\s*\d+)', r' \1', prompt_text, flags=re.IGNORECASE)
             prompt_text = re.sub(r'[,\.;:\!\?]+\s+(\-\-no\s+logo)', r' \1', prompt_text, flags=re.IGNORECASE)
 
-            # Убираем крайние кавычки
             if prompt_text.startswith('"') and prompt_text.endswith('"'):
                 prompt_text = prompt_text[1:-1].strip()
 
-            # Проверяем, не впихнул ли GPT несколько --ar, --no logo
+            # Несколько --ar или --no logo => retry
             if prompt_text.lower().count("--ar") > 1 or prompt_text.lower().count("--no logo") > 1:
                 logger.warning("GPT сгенерировал несколько промтов в одном ответе. Повтор запроса.")
                 time.sleep(1.0)
                 continue
 
-            # =========== Валидируем 45 слов, первое предложение, и т.д. ============
+            # Проверяем минимальные 28 слов и первое предложение <=100 символов
             if not check_prompt_valid(prompt_text):
-                logger.warning("Промт не прошёл валидацию (слова/предложение). Повтор запроса.")
+                logger.warning("Промт не прошёл локальную валидацию. Повтор запроса.")
                 time.sleep(1.0)
                 continue
 
-            # Если всё ок
+            # Всё ок
             prompts_data.append([prompt_text])
             count_generated += 1
 
-        # Конец while. Выгружаем
         worksheet = get_today_sheet()
         worksheet.append_rows(prompts_data)
 
