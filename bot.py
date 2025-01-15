@@ -93,6 +93,7 @@ def set_model(update, context):
     else:
         update.message.reply_text("Укажите модель: /set_model gpt-4o-mini")
 
+
 def count_words_excluding_params(prompt_text: str) -> int:
     """
     Считает количество слов, исключая те, что начинаются на '--'.
@@ -107,25 +108,56 @@ def count_words_excluding_params(prompt_text: str) -> int:
             count += 1
     return count
 
+def fix_s_parameter(prompt_text: str) -> str:
+    """
+    Исправляет случаи, когда GPT вывел '--s' без цифры.
+    Если нет числа или оно некорректно, подставляем 50 или 250 случайно.
+    Пример:
+      '--s' -> '--s 50'
+      '--s abc' -> '--s 50'
+      '--s 50' -> оставляем
+      '--s 250' -> оставляем
+      '--s 1000' -> оставляем (можно ужесточить при желании).
+    """
+
+    pattern = re.compile(r'--s\s*(\d+)?', re.IGNORECASE)
+
+    def replacer(match):
+        s_number = match.group(1)  # None или число
+        if s_number is None:
+            # Вообще нет числа
+            return f"--s {random.choice(['50','250'])}"
+        elif not s_number.isdigit():
+            # s_number не число (например, abc)
+            return f"--s {random.choice(['50','250'])}"
+        else:
+            # s_number - корректные цифры
+            # (Если хотите ужесточить, что только 50 и 250 разрешено, делайте check)
+            return match.group(0)
+
+    new_text = pattern.sub(replacer, prompt_text)
+    return new_text
+
 def generate(update, context):
     """
     /generate <count> <prompt>
-    
-    - System-сообщение: Бот тщательно анализирует тему и создаёт промты для фотостоков,
-      лаконичные, минималистичные, с copy space, минимум 45 слов (идеал).
-    - Если итог <28 слов => делаем re-try (не принимаем).
-    - Если 28..44 => принимаем c warning.
-    - Если >=45 => отлично.
-    - --ar: 70% (3:2), 20% (16:9), 10% (2:3)
-    - 25% шанс добавить --style raw
-    - Убираем любые двойные кавычки внутри, если пользователь сам не вводил их.
+
+    Логика:
+    - System-сообщение: "минимум 45 слов, лаконичные, минималистичные, copy space, etc."
+    - Если <28 слов => re-try
+    - 28..44 => warning, но принимаем
+    - >=45 => отлично
+    - --ar (70%, 20%, 10%)
+    - --style raw (25%)
+    - Убираем двойные кавычки (если пользователь не ввёл)
+    - fix_s_parameter() исправляет '--s' без цифры
     """
+
     global bot_active
     if not bot_active:
-        update.message.reply_text("Бот на паузе. /resume для продолжения.")
+        update.message.reply_text("Бот на паузе. /resume для возобновления.")
         return
 
-    # Парсим аргументы
     args = context.args
     if not args:
         count = 10
@@ -140,7 +172,7 @@ def generate(update, context):
 
     update.message.reply_text(f"Генерирую {count} промтов...")
 
-    # Проверяем, есть ли в user_prompt двойные кавычки
+    # Проверяем, есть ли кавычки в пользовательском запросе
     user_has_quotes = '"' in user_prompt
 
     prompts_data = []
@@ -152,24 +184,24 @@ def generate(update, context):
         while count_generated < count and attempts < max_attempts:
             attempts += 1
 
-            # 1. Случайный выбор --ar
+            # Случайный выбор --ar
             ar_choice = random.choices(
                 ["--ar 3:2", "--ar 16:9", "--ar 2:3"],
                 weights=[0.7, 0.2, 0.1],
                 k=1
             )[0]
 
-            # 2. 25% шанс для --style raw
+            # 25% шанс для --style raw
             add_style_raw = (random.random() < 0.25)
 
-            # 3. Случайный выбор --s
+            # Случайный выбор --s
             s_choice = random.choices(
                 ["--s 50", "--s 250", ""],
                 weights=[0.25, 0.25, 0.5],
                 k=1
             )[0]
 
-            # System-message
+            # Собираем system-message
             system_message = (
                 "You are an assistant that meticulously analyzes the given theme, then composes a list "
                 "of prompts specifically for photostocks. These prompts must be:\n"
@@ -182,13 +214,11 @@ def generate(update, context):
                 "No greetings, disclaimers, or multiple prompts in one answer."
             )
 
-            # User-message
             user_message = (
                 f"{user_prompt}\n\n"
                 "IMPORTANT: Generate ONLY ONE prompt. Follow the system rules strictly."
             )
 
-            # Запрос к OpenAI
             response = openai.ChatCompletion.create(
                 model=current_model,
                 messages=[
@@ -199,14 +229,14 @@ def generate(update, context):
             )
             raw_text = response.choices[0].message.content.strip()
 
-            # Пост-обработка:
+            # Убираем переносы
             raw_text = raw_text.replace("\n", " ").replace("\r", " ")
 
             # Если GPT не вставил --no logo
             if "--no logo" not in raw_text.lower():
                 raw_text += " --no logo"
 
-            # Если нужно --style raw
+            # Добавить --style raw?
             if add_style_raw:
                 match_style = re.search(r"(.*?)--no logo", raw_text, flags=re.IGNORECASE)
                 if match_style:
@@ -222,7 +252,7 @@ def generate(update, context):
             else:
                 prompt_text = raw_text
 
-            # Убираем пунктуацию возле --ar, --s, --no logo, --style raw
+            # Убираем лишние знаки препинания возле --ar, --s, --no logo, --style raw
             prompt_text = re.sub(r'(\-\-ar\s*\d+:\d+)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
             prompt_text = re.sub(r'(\-\-s\s*\d+)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
             prompt_text = re.sub(r'(\-\-no\s+logo)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
@@ -237,30 +267,31 @@ def generate(update, context):
             if prompt_text.startswith('"') and prompt_text.endswith('"'):
                 prompt_text = prompt_text[1:-1].strip()
 
-            # Если пользователь сам не вводил кавычки
+            # Если пользователь не вводил кавычки
             if not user_has_quotes:
                 prompt_text = prompt_text.replace('"', '')
 
-            # Подсчитываем кол-во слов (не включая --параметры)
+            # === ВАЖНО: чиним --s без числа
+            prompt_text = fix_s_parameter(prompt_text)
+
+            # Считаем слова (без --параметров)
             word_count = count_words_excluding_params(prompt_text)
 
             if word_count < 28:
-                # <28 слов => re-try
                 logger.warning(f"ОТКЛОНЁН промт: {word_count} слов (<28). Attempt={attempts}")
                 time.sleep(1.0)
                 continue
             elif word_count < 45:
-                # 28..44 => принимаем, но warning
-                logger.warning(f"Промт {word_count} слов, (меньше 45) => принимаем c предупреждением.")
+                logger.warning(f"Промт {word_count} слов (28..44) => принимаем с предупреждением.")
             else:
-                # >=45 => идеально
+                # >=45 => отлично
                 pass
 
-            # Промт принимаем
+            # Добавляем в result
             prompts_data.append([prompt_text])
             count_generated += 1
 
-        # Сохраняем результат
+        # Записываем в Google Sheets
         worksheet = get_today_sheet()
         worksheet.append_rows(prompts_data)
 
