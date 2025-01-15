@@ -94,11 +94,10 @@ def set_model(update, context):
         update.message.reply_text("Укажите модель: /set_model gpt-4o-mini")
 
 # ---------------- Вспомогательная функция ----------------
-
 def chunk_text(text, chunk_size=1200):
     """
     Разбивает большой текст на куски ~по 1200 символов,
-    чтобы каждый из них отправить отдельным user-сообщением.
+    чтобы каждый кусок отправить отдельным user-сообщением.
     """
     chunks = []
     start = 0
@@ -108,7 +107,6 @@ def chunk_text(text, chunk_size=1200):
         start = end
     return chunks
 
-# ---------------------------------------------------------
 def count_words_excluding_params(prompt_text: str) -> int:
     """
     Считает кол-во «обычных» слов, исключая те, что начинаются на '--'.
@@ -126,8 +124,10 @@ def count_words_excluding_params(prompt_text: str) -> int:
 def generate(update, context):
     """
     /generate <count> <prompt>
-    Мы разбиваем user_prompt на несколько кусков, каждый отправляем отдельным user-сообщением,
-    чтобы GPT "гарантированно" прочёл всё. В System-сообщении указываем "прочитай всё до конца".
+    1) Разбиваем user_prompt на части, чтобы GPT "читал" всё (chunk_text).
+    2) Формируем массив messages: 1 system + несколько user (части текста) + финальное user.
+    3) В цикле, для каждого промта, делаем попытки (retries).
+       Если промт короче 28 слов -> повторяем запрос до max_attempts.
     """
     global bot_active
     if not bot_active:
@@ -149,69 +149,67 @@ def generate(update, context):
     update.message.reply_text(f"Генерирую {count} промтов...")
 
     try:
-        # 1. Разбиваем user_prompt_raw на куски ~1200 символов
-        # (Можете менять chunk_size при желании)
+        # 1. Разбиваем user_prompt_raw
         prompt_chunks = chunk_text(user_prompt_raw, chunk_size=1200)
 
-        # 2. Подготовим массив messages
-        # Системное сообщение: указываем, что нужно внимательно прочитать ВСЕ user-сообщения
+        # 2. Готовим system_message
         system_message = (
             "You are an assistant that MUST READ ALL user instructions carefully and incorporate all details. "
             "Do not ignore any part of the user's text, even if it is long. "
-            "After you have read everything, you will generate EXACTLY ONE single-line Midjourney prompt per request, "
-            "with the following rules:\n"
-            "1) The prompt must be at least ~45 words (excluding --params).\n"
-            "2) The first sentence is ideally <=100 characters and ends with a period.\n"
-            "3) Include minimalistic, copy space, clean image, etc., or any other user hints.\n"
-            "4) End with random --ar and --s (or empty) plus --no logo.\n"
-            "5) Output only one line. No disclaimers.\n"
-            "6) Absolutely do not skip the latter part of user's instructions.\n"
+            "After reading everything, generate EXACTLY ONE single-line Midjourney prompt, applying these rules:\n"
+            "1) Must be at least ~45 words (excluding words starting with --). [We will accept min 28 in code, see below.]\n"
+            "2) The first sentence ideally <= 100 characters and ends with a period.\n"
+            "3) Must include minimalistic, copy space, clean image, etc. or any other user hints.\n"
+            "4) End with random --ar ... plus possibly --s ... plus --no logo.\n"
+            "5) Only one line. No disclaimers.\n"
+            "6) Absolutely do not skip the latter parts of instructions.\n"
         )
 
-        # Соберём messages: сначала одно system-сообщение
+        # Основной массив messages
         messages = [
             {"role": "system", "content": system_message}
         ]
 
-        # Затем добавляем все куски user_prompt как отдельные user-сообщения
-        # Это имитирует длинный контекст, "вшитый" в диалог.
+        # Добавляем все куски user-инструкции как отдельные user-сообщения
         for i, chunk in enumerate(prompt_chunks):
-            messages.append({"role": "user", "content": f"(PART {i+1}/{len(prompt_chunks)})\n{chunk}"})
+            messages.append({
+                "role": "user",
+                "content": f"(PART {i+1}/{len(prompt_chunks)})\n{chunk}"
+            })
 
-        # Наконец, добавляем "заключительную" user-инструкцию:
-        # "Now generate a single prompt..."
-        # Можете изменить wording по вкусу, но важно попросить итоговый ответ.
+        # Добавляем "итоговую" инструкцию: "Now generate a single prompt..."
         messages.append({
             "role": "user",
             "content": (
-                f"Now, based on ALL the instructions above (parts 1..{len(prompt_chunks)}), "
-                f"generate exactly ONE single-line prompt. We need {count} total prompts, so we'll call you repeatedly. "
-                "For this single call, produce exactly one prompt. Follow the rules strictly."
+                f"Now, based on ALL instructions above (parts 1..{len(prompt_chunks)}), "
+                f"generate EXACTLY one prompt. We need {count} total prompts, so we will call you repeatedly. "
+                "For each call, produce exactly one single-line prompt. Follow the rules strictly."
             )
         })
 
         prompts_data = []
+        count_generated = 0
+        attempts_limit = 50  # максимальное количество общих попыток
+        attempts = 0
 
-        for _ in range(count):
-            # Рандом --ar
+        while count_generated < count and attempts < attempts_limit:
+            attempts += 1
+
+            # Генерируем рандом --ar
             ar_choice = random.choices(["--ar 3:2", "--ar 16:9", "--ar 2:3"], [0.6, 0.2, 0.2])[0]
-            # Рандом --s
+            # Генерируем рандом --s
             s_choice = random.choices(["--s 50", "--s 250", ""], [0.25, 0.25, 0.5])[0]
 
-            # Мы можем модифицировать "system_message" на лету, если надо.
-            # Но сейчас для упрощения — тот же messages, а "конкретный" ar/s подставим через "assistant"?
-            # Проще всего: добавим ещё одно user-сообщение "Вставь, пожалуйста, в конце: {ar_choice} {s_choice} --no logo"
-
-            # Делаем копию messages, чтобы не портить оригинал
+            # Локальная копия messages
             local_messages = list(messages)
 
-            # Добавляем ещё одно user-сообщение с конкретными параметрами
+            # Добавляем отдельное user-сообщение с параметрами
             local_messages.append({
                 "role": "user",
                 "content": (
                     f"For THIS prompt, end with: {ar_choice}"
                     f"{(' ' + s_choice if s_choice else '')} --no logo. "
-                    "Remember: exactly one single-line prompt."
+                    "Exactly one prompt, no disclaimers."
                 )
             })
 
@@ -220,10 +218,9 @@ def generate(update, context):
                 messages=local_messages,
                 temperature=0.9
             )
-
             raw_text = response.choices[0].message.content.strip()
 
-            # Пост-обработка
+            # ---- Пост-обработка ----
             raw_text = raw_text.replace("\n", " ").replace("\r", " ")
             match = re.search(r"(.*?--no logo)", raw_text, flags=re.IGNORECASE)
             if match:
@@ -231,44 +228,13 @@ def generate(update, context):
             else:
                 prompt_text = raw_text
 
-            # Убираем пунктуацию возле --ar, --s, --no logo
-            prompt_text = re.sub(
-                r'(\-\-ar\s*\d+:\d+)[\.,;:\!\?]+',
-                r'\1',
-                prompt_text,
-                flags=re.IGNORECASE
-            )
-            prompt_text = re.sub(
-                r'(\-\-s\s*\d+)[\.,;:\!\?]+',
-                r'\1',
-                prompt_text,
-                flags=re.IGNORECASE
-            )
-            prompt_text = re.sub(
-                r'(\-\-no\s+logo)[\.,;:\!\?]+',
-                r'\1',
-                prompt_text,
-                flags=re.IGNORECASE
-            )
+            prompt_text = re.sub(r'(\-\-ar\s*\d+:\d+)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
+            prompt_text = re.sub(r'(\-\-s\s*\d+)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
+            prompt_text = re.sub(r'(\-\-no\s+logo)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
 
-            prompt_text = re.sub(
-                r'[,\.;:\!\?]+\s+(\-\-ar\s*\d+:\d+)',
-                r' \1',
-                prompt_text,
-                flags=re.IGNORECASE
-            )
-            prompt_text = re.sub(
-                r'[,\.;:\!\?]+\s+(\-\-s\s*\d+)',
-                r' \1',
-                prompt_text,
-                flags=re.IGNORECASE
-            )
-            prompt_text = re.sub(
-                r'[,\.;:\!\?]+\s+(\-\-no\s+logo)',
-                r' \1',
-                prompt_text,
-                flags=re.IGNORECASE
-            )
+            prompt_text = re.sub(r'[,\.;:\!\?]+\s+(\-\-ar\s*\d+:\d+)', r' \1', prompt_text, flags=re.IGNORECASE)
+            prompt_text = re.sub(r'[,\.;:\!\?]+\s+(\-\-s\s*\d+)', r' \1', prompt_text, flags=re.IGNORECASE)
+            prompt_text = re.sub(r'[,\.;:\!\?]+\s+(\-\-no\s+logo)', r' \1', prompt_text, flags=re.IGNORECASE)
 
             if prompt_text.startswith('"') and prompt_text.endswith('"'):
                 prompt_text = prompt_text[1:-1].strip()
@@ -276,16 +242,27 @@ def generate(update, context):
             if prompt_text.lower().count("--ar") > 1 or prompt_text.lower().count("--no logo") > 1:
                 logger.warning("GPT сгенерировал несколько промтов в одном ответе, но принимаем без наказания.")
 
+            # ---- ЖЁСТКАЯ ВАЛИДАЦИЯ (не меньше 28 слов) ----
             word_count = count_words_excluding_params(prompt_text)
             if word_count < 28:
-                logger.warning(f"Промт короткий ({word_count} слов), но принимаем без наказания.")
+                logger.warning(
+                    f"Промт слишком короткий ({word_count} слов). Повтор запроса. Attempt={attempts}"
+                )
+                time.sleep(1.0)
+                # Не добавляем к результату, просто continue
+                continue
 
+            # Если всё ок, добавляем
             prompts_data.append([prompt_text])
+            count_generated += 1
 
+        # Запись в Google Sheets
         worksheet = get_today_sheet()
         worksheet.append_rows(prompts_data)
 
-        update.message.reply_text(f"Готово! Сгенерировано {count} промтов.")
+        update.message.reply_text(
+            f"Готово! Сгенерировано {count_generated} промтов. (из {count} желаемых)"
+        )
 
     except Exception as e:
         logger.error(f"Ошибка генерации: {e}")
