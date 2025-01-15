@@ -151,7 +151,7 @@ def generate(update, context):
     - Итог: если <28 слов => re-try, 28..44 => warning, >=45 => ок
     - Убираем любые упоминания GPT о --ar, --s, --style, --no logo
     - Потом добавляем корректную строку параметров (из generate_correct_params).
-    - Повышаем temperature до 1.2 для большего разнообразия.
+    - Повышаем temperature до 1.0 для большего разнообразия.
     """
     global bot_active
     if not bot_active:
@@ -208,7 +208,7 @@ def generate(update, context):
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": user_message}
                 ],
-                temperature=1.2  # повышаем для большей вариативности
+                temperature=1.0  # повышаем для большей вариативности
             )
             raw_text = response.choices[0].message.content.strip()
 
