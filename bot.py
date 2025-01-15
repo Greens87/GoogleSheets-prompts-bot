@@ -155,7 +155,7 @@ def generate(update, context):
                 "Requirements:\n"
                 "1) The prompt must be at least 45 words (excluding any words starting with --).\n"
                 "2) The first sentence is ideally <= 100 characters and ends with a period.\n"
-                "3) Include copy space.\n"
+                "3) Include minimalistic, copy space.\n"
                 "4) If no specific style is given, vary: people, no people, blurred backgrounds, objects on solid color, etc.\n"
                 f"5) End the prompt with: {ar_choice}{(' ' + s_choice if s_choice else '')} --no logo\n"
                 "6) Do NOT insert commas or periods right after --ar, --s, or --no logo.\n"
