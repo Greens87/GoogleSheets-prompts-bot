@@ -11,9 +11,9 @@ import random
 import re
 import time
 
-# ======= ВРЕМЕННАЯ ОТЛАДКА ОКРУЖЕНИЯ (можно закомментировать) =======
+# ======= ВРЕМЕННАЯ ОТЛАДКА (можно закомментировать) =======
 pprint.pprint(dict(os.environ))
-# ====================================================================
+# ==========================================================
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -63,7 +63,7 @@ def get_today_sheet():
     return worksheet
 
 bot_active = True
-current_model = "gpt-4o-mini"  # Название используемой модели
+current_model = "gpt-4o-mini"  # Модель
 
 def start(update, context):
     update.message.reply_text(
@@ -94,11 +94,11 @@ def set_model(update, context):
         update.message.reply_text("Укажите модель: /set_model gpt-4o-mini")
 
 
-def count_words_excluding_params(prompt_text: str) -> int:
+def count_words_excluding_params(text: str) -> int:
     """
-    Считает количество слов, исключая те, что начинаются на '--'.
+    Считаем количество слов, исключая те, что начинаются на '--'.
     """
-    tokens = prompt_text.split()
+    tokens = text.split()
     count = 0
     for t in tokens:
         candidate = t.strip(",.!?;:\r\n\"'()[]")
@@ -108,54 +108,55 @@ def count_words_excluding_params(prompt_text: str) -> int:
             count += 1
     return count
 
-def fix_s_parameter(prompt_text: str) -> str:
+
+def generate_correct_params() -> str:
     """
-    Исправляет случаи, когда GPT вывел '--s' без цифры.
-    Если нет числа или оно некорректно, подставляем 50 или 250 случайно.
-    Пример:
-      '--s' -> '--s 50'
-      '--s abc' -> '--s 50'
-      '--s 50' -> оставляем
-      '--s 250' -> оставляем
-      '--s 1000' -> оставляем (можно ужесточить при желании).
+    Генерирует правильную строку с параметрами:
+    - --ar: 70% (3:2), 20% (16:9), 10% (2:3)
+    - --s: 25% --s 50, 25% --s 250, 50% пусто
+    - --style raw: 25% 
+    - --no logo: всегда
+    Итог: "<ar_choice> <s_choice_if_any> <style_raw_if_any> --no logo"
     """
+    # 1. ar
+    ar_choice = random.choices(
+        ["--ar 3:2", "--ar 16:9", "--ar 2:3"],
+        weights=[0.7, 0.2, 0.1],
+        k=1
+    )[0]
 
-    pattern = re.compile(r'--s\s*(\d+)?', re.IGNORECASE)
+    # 2. s
+    s_var = random.choices(
+        ["--s 50", "--s 250", ""],
+        weights=[0.25, 0.25, 0.5],
+        k=1
+    )[0]
 
-    def replacer(match):
-        s_number = match.group(1)  # None или число
-        if s_number is None:
-            # Вообще нет числа
-            return f"--s {random.choice(['50','250'])}"
-        elif not s_number.isdigit():
-            # s_number не число (например, abc)
-            return f"--s {random.choice(['50','250'])}"
-        else:
-            # s_number - корректные цифры
-            # (Если хотите ужесточить, что только 50 и 250 разрешено, делайте check)
-            return match.group(0)
+    # 3. style raw (25% шанс)
+    add_style_raw = (random.random() < 0.25)
+    style_part = "--style raw" if add_style_raw else ""
 
-    new_text = pattern.sub(replacer, prompt_text)
-    return new_text
+    # Собираем финально
+    parts = [ar_choice]
+    if s_var != "":
+        parts.append(s_var)
+    if style_part:
+        parts.append(style_part)
+    parts.append("--no logo")
+
+    return " ".join(parts)
 
 def generate(update, context):
     """
     /generate <count> <prompt>
-
-    Логика:
-    - System-сообщение: "минимум 45 слов, лаконичные, минималистичные, copy space, etc."
-    - Если <28 слов => re-try
-    - 28..44 => warning, но принимаем
-    - >=45 => отлично
-    - --ar (70%, 20%, 10%)
-    - --style raw (25%)
-    - Убираем двойные кавычки (если пользователь не ввёл)
-    - fix_s_parameter() исправляет '--s' без цифры
+    - System-message: минимум 45 слов, "laconic, minimalistic, must include copy space..."
+    - Итог: если <28 слов => re-try, 28..44 => warning, >=45 => ок
+    - Убираем любые упоминания GPT о --ar, --s, --style, --no logo
+    - Потом добавляем корректную строку параметров (из generate_correct_params).
     """
-
     global bot_active
     if not bot_active:
-        update.message.reply_text("Бот на паузе. /resume для возобновления.")
+        update.message.reply_text("Бот на паузе. /resume для продолжения.")
         return
 
     args = context.args
@@ -184,24 +185,7 @@ def generate(update, context):
         while count_generated < count and attempts < max_attempts:
             attempts += 1
 
-            # Случайный выбор --ar
-            ar_choice = random.choices(
-                ["--ar 3:2", "--ar 16:9", "--ar 2:3"],
-                weights=[0.7, 0.2, 0.1],
-                k=1
-            )[0]
-
-            # 25% шанс для --style raw
-            add_style_raw = (random.random() < 0.25)
-
-            # Случайный выбор --s
-            s_choice = random.choices(
-                ["--s 50", "--s 250", ""],
-                weights=[0.25, 0.25, 0.5],
-                k=1
-            )[0]
-
-            # Собираем system-message
+            # ==== System + user ====
             system_message = (
                 "You are an assistant that meticulously analyzes the given theme, then composes a list "
                 "of prompts specifically for photostocks. These prompts must be:\n"
@@ -210,7 +194,6 @@ def generate(update, context):
                 "- Must include 'copy space'\n"
                 "- Must be at least 45 words (excluding words starting with --)\n"
                 "- The first sentence ideally <=100 characters, ends with a period\n"
-                "- End with parameters like --ar, --s, --no logo, possibly --style raw\n"
                 "No greetings, disclaimers, or multiple prompts in one answer."
             )
 
@@ -229,54 +212,33 @@ def generate(update, context):
             )
             raw_text = response.choices[0].message.content.strip()
 
-            # Убираем переносы
+            # 1) Убираем переносы
             raw_text = raw_text.replace("\n", " ").replace("\r", " ")
 
-            # Если GPT не вставил --no logo
-            if "--no logo" not in raw_text.lower():
-                raw_text += " --no logo"
+            # 2) Полностью вычищаем любые упоминания GPT о --ar, --s, --style, --no logo
+            #    Мы потом сами добавим корректные параметры в конце.
+            raw_text = re.sub(r'--ar\s*\S+', '', raw_text, flags=re.IGNORECASE)
+            raw_text = re.sub(r'--s\s*\S+', '', raw_text, flags=re.IGNORECASE)
+            raw_text = re.sub(r'--style\s*\S+', '', raw_text, flags=re.IGNORECASE)
+            raw_text = re.sub(r'--no\s+logo', '', raw_text, flags=re.IGNORECASE)
 
-            # Добавить --style raw?
-            if add_style_raw:
-                match_style = re.search(r"(.*?)--no logo", raw_text, flags=re.IGNORECASE)
-                if match_style:
-                    before_part = match_style.group(1).strip()
-                    raw_text = f"{before_part} --style raw --no logo"
-                else:
-                    raw_text += " --style raw"
+            # 3) Удаляем крайние кавычки, если GPT всё обернул
+            if raw_text.startswith('"') and raw_text.endswith('"'):
+                raw_text = raw_text[1:-1].strip()
 
-            # Обрезаем всё после '--no logo'
-            match_nl = re.search(r"(.*?--no logo)", raw_text, flags=re.IGNORECASE)
-            if match_nl:
-                prompt_text = match_nl.group(1).strip()
-            else:
-                prompt_text = raw_text
-
-            # Убираем лишние знаки препинания возле --ar, --s, --no logo, --style raw
-            prompt_text = re.sub(r'(\-\-ar\s*\d+:\d+)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
-            prompt_text = re.sub(r'(\-\-s\s*\d+)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
-            prompt_text = re.sub(r'(\-\-no\s+logo)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
-            prompt_text = re.sub(r'(\-\-style\s+raw)[\.,;:\!\?]+', r'\1', prompt_text, flags=re.IGNORECASE)
-
-            prompt_text = re.sub(r'[,\.;:\!\?]+\s+(\-\-ar\s*\d+:\d+)', r' \1', prompt_text, flags=re.IGNORECASE)
-            prompt_text = re.sub(r'[,\.;:\!\?]+\s+(\-\-s\s*\d+)', r' \1', prompt_text, flags=re.IGNORECASE)
-            prompt_text = re.sub(r'[,\.;:\!\?]+\s+(\-\-no\s+logo)', r' \1', prompt_text, flags=re.IGNORECASE)
-            prompt_text = re.sub(r'[,\.;:\!\?]+\s+(\-\-style\s+raw)', r' \1', prompt_text, flags=re.IGNORECASE)
-
-            # Удаляем крайние кавычки
-            if prompt_text.startswith('"') and prompt_text.endswith('"'):
-                prompt_text = prompt_text[1:-1].strip()
-
-            # Если пользователь не вводил кавычки
+            # 4) Если пользователь не вводил кавычки
             if not user_has_quotes:
-                prompt_text = prompt_text.replace('"', '')
+                raw_text = raw_text.replace('"', '')
 
-            # === ВАЖНО: чиним --s без числа
-            prompt_text = fix_s_parameter(prompt_text)
+            # 5) Убираем двойные/тройные пробелы
+            raw_text = re.sub(r'\s+', ' ', raw_text).strip()
 
-            # Считаем слова (без --параметров)
+            # 6) Теперь добавляем корректную строку параметров
+            correct_params = generate_correct_params()
+            prompt_text = f"{raw_text} {correct_params}".strip()
+
+            # 7) Считаем слова
             word_count = count_words_excluding_params(prompt_text)
-
             if word_count < 28:
                 logger.warning(f"ОТКЛОНЁН промт: {word_count} слов (<28). Attempt={attempts}")
                 time.sleep(1.0)
@@ -287,7 +249,7 @@ def generate(update, context):
                 # >=45 => отлично
                 pass
 
-            # Добавляем в result
+            # 8) Добавляем в списки
             prompts_data.append([prompt_text])
             count_generated += 1
 
