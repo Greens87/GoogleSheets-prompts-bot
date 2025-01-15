@@ -21,7 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===== Читаем переменные окружения =====
+# ===== Чтение переменных окружения =====
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
@@ -63,7 +63,8 @@ def get_today_sheet():
     return worksheet
 
 bot_active = True
-current_model = "gpt-4o-mini"  # Модель
+# === Ставим модель “gpt-4o” вместо “gpt-4o-mini” ===
+current_model = "gpt-4o"  
 
 def start(update, context):
     update.message.reply_text(
@@ -91,8 +92,7 @@ def set_model(update, context):
         current_model = new_model
         update.message.reply_text(f"Модель переключена на {current_model}")
     else:
-        update.message.reply_text("Укажите модель: /set_model gpt-4o-mini")
-
+        update.message.reply_text("Укажите модель: /set_model gpt-4o")
 
 def count_words_excluding_params(text: str) -> int:
     """
@@ -107,7 +107,6 @@ def count_words_excluding_params(text: str) -> int:
         if candidate:
             count += 1
     return count
-
 
 def generate_correct_params() -> str:
     """
@@ -136,7 +135,6 @@ def generate_correct_params() -> str:
     add_style_raw = (random.random() < 0.25)
     style_part = "--style raw" if add_style_raw else ""
 
-    # Собираем финально
     parts = [ar_choice]
     if s_var != "":
         parts.append(s_var)
@@ -153,6 +151,7 @@ def generate(update, context):
     - Итог: если <28 слов => re-try, 28..44 => warning, >=45 => ок
     - Убираем любые упоминания GPT о --ar, --s, --style, --no logo
     - Потом добавляем корректную строку параметров (из generate_correct_params).
+    - Повышаем temperature до 1.2 для большего разнообразия.
     """
     global bot_active
     if not bot_active:
@@ -202,13 +201,14 @@ def generate(update, context):
                 "IMPORTANT: Generate ONLY ONE prompt. Follow the system rules strictly."
             )
 
+            # Вызываем gpt-4o с повышенной temperature
             response = openai.ChatCompletion.create(
                 model=current_model,
                 messages=[
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": user_message}
                 ],
-                temperature=0.9
+                temperature=1.2  # повышаем для большей вариативности
             )
             raw_text = response.choices[0].message.content.strip()
 
@@ -216,7 +216,6 @@ def generate(update, context):
             raw_text = raw_text.replace("\n", " ").replace("\r", " ")
 
             # 2) Полностью вычищаем любые упоминания GPT о --ar, --s, --style, --no logo
-            #    Мы потом сами добавим корректные параметры в конце.
             raw_text = re.sub(r'--ar\s*\S+', '', raw_text, flags=re.IGNORECASE)
             raw_text = re.sub(r'--s\s*\S+', '', raw_text, flags=re.IGNORECASE)
             raw_text = re.sub(r'--style\s*\S+', '', raw_text, flags=re.IGNORECASE)
